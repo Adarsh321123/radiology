@@ -21,9 +21,8 @@ a torchvision.v2 transform pipeline.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable
 
 import numpy as np
 import pandas as pd
@@ -158,12 +157,6 @@ def load_and_split(
 # --------------------------------------------------------------------------- #
 # Dataset
 # --------------------------------------------------------------------------- #
-@dataclass
-class CheXpertRow:
-    path: str
-    labels: np.ndarray
-
-
 class CheXpertDataset(Dataset):
     def __init__(
         self,

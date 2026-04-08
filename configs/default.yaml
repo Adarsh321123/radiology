@@ -2,7 +2,7 @@
 # Copy this file and edit `run_name` before launching each new run.
 # Every field defined in config.py::Config can be overridden here.
 
-run_name: default                              # <-- change per run
+run_name: v1                                   # <-- change per run
 runs_root: /data/artifacts/frank/misc/runs
 
 # data

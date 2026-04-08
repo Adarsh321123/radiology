@@ -73,7 +73,13 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path, help="output submission CSV path")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--num-workers", type=int, default=8)
+    ap.add_argument("--force", action="store_true", help="overwrite --out if it exists")
     args = ap.parse_args()
+
+    if args.out.exists() and not args.force:
+        raise FileExistsError(
+            f"{args.out} already exists. Pass --force to overwrite, or pick a different --out path."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"loading ckpt: {args.ckpt}", flush=True)
@@ -107,6 +113,16 @@ def main() -> None:
     probs = np.concatenate(all_probs, axis=0)
     print(f"inference done in {time.time()-t0:.1f}s  shape={probs.shape}", flush=True)
 
+    # Integrity checks: every test row produced one prediction, ids unique.
+    if len(all_ids) != len(df):
+        raise RuntimeError(
+            f"id count mismatch: predicted {len(all_ids)} but test_ids.csv has {len(df)}"
+        )
+    if len(set(all_ids)) != len(all_ids):
+        raise RuntimeError("duplicate Ids in submission — DataLoader order bug?")
+    if probs.shape[0] != len(all_ids):
+        raise RuntimeError(f"probs rows={probs.shape[0]} != ids={len(all_ids)}")
+
     # write submission CSV
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", newline="") as f:
@@ -114,7 +130,7 @@ def main() -> None:
         writer.writerow(["Id"] + cfg.label_names)
         for i, p in zip(all_ids, probs):
             writer.writerow([i] + [f"{v:.6f}" for v in p])
-    print(f"wrote {args.out}", flush=True)
+    print(f"wrote {args.out}  ({len(all_ids)} rows)", flush=True)
 
 
 if __name__ == "__main__":

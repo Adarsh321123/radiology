@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/home/fxiao/misc/slurm_logs/%j.out
 
 # Launch: sbatch slurm/train.sh [config_path]
@@ -29,6 +29,8 @@ echo "=============================================="
 export NCCL_DEBUG=WARN
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=8
+# Flush Python stdout immediately so live `tail -f` on the slurm log is responsive.
+export PYTHONUNBUFFERED=1
 export TORCH_HOME="${HOME}/.cache/torch"
 mkdir -p "${TORCH_HOME}"
 

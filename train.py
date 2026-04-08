@@ -10,11 +10,9 @@ The resolved config is copied into the run directory as provenance.
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import math
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -49,6 +47,22 @@ def _json_safe(obj):
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
     return obj
+
+
+def _validate_config(cfg: Config) -> None:
+    """Fast sanity checks that should fire before the model is constructed."""
+    for attr in ("labels_csv", "test_ids_csv", "dinov3_repo", "dinov3_weights", "data_root"):
+        p = Path(getattr(cfg, attr))
+        if not p.exists():
+            raise FileNotFoundError(f"cfg.{attr}={p} does not exist")
+    if cfg.head_type not in ("cls", "attention"):
+        raise ValueError(f"cfg.head_type must be 'cls' or 'attention', got {cfg.head_type!r}")
+    if cfg.num_labels != len(cfg.label_names):
+        raise ValueError(f"cfg.num_labels={cfg.num_labels} != len(label_names)={len(cfg.label_names)}")
+    if cfg.epochs <= 0:
+        raise ValueError(f"cfg.epochs must be > 0, got {cfg.epochs}")
+    if cfg.batch_size_per_gpu <= 0:
+        raise ValueError(f"cfg.batch_size_per_gpu must be > 0, got {cfg.batch_size_per_gpu}")
 
 
 # --------------------------------------------------------------------------- #
@@ -176,8 +190,13 @@ def main() -> None:
     parser.add_argument("--config", required=True, type=str, help="path to YAML config")
     args = parser.parse_args()
 
-    rank, world_size, local_rank, device = setup_ddp()
     cfg = Config.from_yaml(args.config)
+
+    # Preflight validation BEFORE loading 840M params — a typo in the yaml
+    # should fail in <1s, not 90s into model load on a SLURM allocation.
+    _validate_config(cfg)
+
+    rank, world_size, local_rank, device = setup_ddp()
 
     # Seed
     torch.manual_seed(cfg.seed + rank)
@@ -190,11 +209,6 @@ def main() -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         cfg.save_yaml(run_dir / "config.yaml")
-        # also copy the *original* yaml in case it has comments the user wants
-        try:
-            shutil.copy(args.config, run_dir / "config.source.yaml")
-        except Exception:
-            pass
 
     if world_size > 1:
         dist.barrier()
@@ -263,9 +277,41 @@ def main() -> None:
             flush=True,
         )
 
-    # -------------------- training loop --------------------
+    # -------------------- resume state --------------------
     global_step = 0
     best_mean_auc = float("-inf")
+    start_epoch = 0
+    skip_in_start_epoch = 0
+    resume_path = ckpt_dir / "ckpt_last.pt"
+    if resume_path.exists():
+        if is_main(rank):
+            print(f"[rank 0] resuming from {resume_path}", flush=True)
+        resume_ckpt = torch.load(str(resume_path), map_location="cpu", weights_only=False)
+        inner.load_state_dict(resume_ckpt["model"], strict=True)
+        optimizer.load_state_dict(resume_ckpt["optimizer"])
+        scheduler.load_state_dict(resume_ckpt["scheduler"])
+        global_step = int(resume_ckpt["step"])
+        start_epoch = int(resume_ckpt["epoch"])
+        bm = resume_ckpt.get("best_mean_auc", float("-inf"))
+        if isinstance(bm, (int, float)) and math.isfinite(bm):
+            best_mean_auc = float(bm)
+        # Batches already consumed within the start epoch (to fast-forward).
+        skip_in_start_epoch = global_step - start_epoch * steps_per_epoch
+        if skip_in_start_epoch < 0 or skip_in_start_epoch >= steps_per_epoch:
+            # saved at an epoch boundary → start next epoch clean
+            start_epoch += 1
+            skip_in_start_epoch = 0
+        del resume_ckpt
+        if is_main(rank):
+            print(
+                f"[rank 0] resumed: step={global_step}  start_epoch={start_epoch+1}  "
+                f"skip_in_epoch={skip_in_start_epoch}  best_mean_auc={best_mean_auc:.4f}",
+                flush=True,
+            )
+    if world_size > 1:
+        dist.barrier()
+
+    # -------------------- training loop --------------------
     metrics_path = run_dir / "metrics.jsonl"
     if is_main(rank):
         metrics_path.touch(exist_ok=True)
@@ -286,10 +332,24 @@ def main() -> None:
 
     accum = fresh_accum()
     t_loop_start = time.time()
+    best_epoch = None
+    best_step = None
+    best_per_label: Dict[str, float] = {}
     model.train()
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         train_sampler.set_epoch(epoch)
-        for x, y in train_loader:
+        train_iter = iter(train_loader)
+        if epoch == start_epoch and skip_in_start_epoch > 0:
+            if is_main(rank):
+                print(f"[rank 0] fast-forwarding {skip_in_start_epoch} batches in epoch {epoch+1}", flush=True)
+            for _ in range(skip_in_start_epoch):
+                try:
+                    next(train_iter)
+                except StopIteration:
+                    break
+        for x, y in train_iter:
+            if cfg.max_steps > 0 and global_step >= cfg.max_steps:
+                break
             global_step += 1
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -345,6 +405,9 @@ def main() -> None:
                     # best (not the one-eval-stale best).
                     if not math.isnan(mean_auc) and mean_auc > best_mean_auc:
                         best_mean_auc = mean_auc
+                        best_epoch = epoch + 1
+                        best_step = global_step
+                        best_per_label = dict(metrics)
                         is_new_best = True
                     else:
                         is_new_best = False
@@ -391,7 +454,29 @@ def main() -> None:
             break
 
     if is_main(rank):
-        print(f"done. best mean_auc={best_mean_auc:.4f}", flush=True)
+        total_time = time.time() - t_loop_start
+        print("=" * 70, flush=True)
+        print(f"TRAINING DONE  total_wall_time={total_time:.0f}s ({total_time/3600:.2f}h)", flush=True)
+        if best_step is not None:
+            print(f"best mean_auc = {best_mean_auc:.4f}  @ step {best_step} (epoch {best_epoch})", flush=True)
+            print("per-label AUROC at best:", flush=True)
+            for name in cfg.label_names:
+                v = best_per_label.get(name, float("nan"))
+                v_str = "nan" if not isinstance(v, (int, float)) or math.isnan(v) else f"{v:.4f}"
+                print(f"  {name:30s}  {v_str}", flush=True)
+        elif math.isfinite(best_mean_auc):
+            print(
+                f"best mean_auc = {best_mean_auc:.4f}  (from a previous session — "
+                f"per-label breakdown not tracked across resume)",
+                flush=True,
+            )
+        else:
+            print("no best checkpoint recorded (all evals returned NaN mean_auc)", flush=True)
+        if (ckpt_dir / "ckpt_best.pt").exists():
+            print(f"ckpt_best.pt: {ckpt_dir / 'ckpt_best.pt'}", flush=True)
+        print(f"ckpt_last.pt: {ckpt_dir / 'ckpt_last.pt'}", flush=True)
+        print(f"metrics log : {metrics_path}", flush=True)
+        print("=" * 70, flush=True)
 
     cleanup_ddp()
 
