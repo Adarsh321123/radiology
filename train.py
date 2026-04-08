@@ -2,7 +2,7 @@
 
 Launch via::
 
-    torchrun --standalone --nproc_per_node=4 train.py --config configs/default.yaml
+    torchrun --standalone --nproc_per_node=4 train.py --config configs/v1.yaml
 
 Parameters, paths, and hyperparameters are all read from the YAML.
 The resolved config is copied into the run directory as provenance.

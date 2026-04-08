@@ -53,7 +53,7 @@ def probe_one(cfg: Config, bs: int, device: torch.device) -> None:
 
 
 def main() -> None:
-    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "default.yaml")
+    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "v1.yaml")
     device = torch.device("cuda:0")
     total = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"device: {torch.cuda.get_device_name(0)}  total={total:.1f}GB  img_size={cfg.image_size}")

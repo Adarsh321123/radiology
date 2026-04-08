@@ -7,12 +7,12 @@
 #SBATCH --output=/home/fxiao/misc/slurm_logs/%j.out
 
 # Launch: sbatch slurm/train.sh [config_path]
-# Default config: configs/default.yaml
+# Default config: configs/v1.yaml
 # Single-node DDP across 4 GPUs via torchrun.
 
 set -euo pipefail
 
-CONFIG="${1:-configs/default.yaml}"
+CONFIG="${1:-configs/v1.yaml}"
 cd /home/fxiao/misc
 
 echo "=============================================="

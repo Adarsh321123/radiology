@@ -34,7 +34,7 @@ def main() -> None:
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True
 
-    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "default.yaml")
+    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "v1.yaml")
     # small batch just to verify pipeline
     cfg.batch_size_per_gpu = 2
     cfg.num_workers = 2
