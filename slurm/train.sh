@@ -1,7 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=chexpert
+#SBATCH --job-name=eval_ifeval
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/fxiao/misc/slurm_logs/%j.out
