@@ -1,10 +1,17 @@
 """Single-GPU smoke test: load model, run 2 train steps + 1 eval on tiny
 subsets. Catches bugs before burning SLURM time on the full 840M ViT-H+
-run. Run with::
+run. Run from the project root::
 
-    CUDA_VISIBLE_DEVICES=0 uv run python smoke_test.py
+    CUDA_VISIBLE_DEVICES=0 uv run python tests/smoke_test.py
 """
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Make the project root importable when this script is invoked from any cwd.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 import time
 import torch
@@ -27,7 +34,7 @@ def main() -> None:
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True
 
-    cfg = Config.from_yaml("configs/default.yaml")
+    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "default.yaml")
     # small batch just to verify pipeline
     cfg.batch_size_per_gpu = 2
     cfg.num_workers = 2

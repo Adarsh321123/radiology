@@ -1,8 +1,18 @@
 """Measure peak GPU memory for one full train step at various batch sizes.
 
-Helps choose batch_size_per_gpu before launching the full run.
+Helps choose batch_size_per_gpu before launching the full run. Run from
+the project root::
+
+    CUDA_VISIBLE_DEVICES=0 uv run python tests/mem_probe.py
 """
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Make the project root importable when this script is invoked from any cwd.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 import time
 import torch
@@ -43,7 +53,7 @@ def probe_one(cfg: Config, bs: int, device: torch.device) -> None:
 
 
 def main() -> None:
-    cfg = Config.from_yaml("configs/default.yaml")
+    cfg = Config.from_yaml(_PROJECT_ROOT / "configs" / "default.yaml")
     device = torch.device("cuda:0")
     total = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"device: {torch.cuda.get_device_name(0)}  total={total:.1f}GB  img_size={cfg.image_size}")
