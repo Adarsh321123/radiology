@@ -78,6 +78,9 @@ class Config:
 
     # --- eval / ckpt ---
     eval_every_steps: int = 500
+    # "nmse" (lower is better, matches judge's scoring) or "auroc"
+    # (higher is better, standard CheXpert convention).
+    primary_metric: str = "nmse"
 
     # --- misc ---
     seed: int = 0

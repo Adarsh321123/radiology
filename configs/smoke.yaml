@@ -30,6 +30,7 @@ grad_clip: 1.0
 mixup_alpha: 0.1
 
 eval_every_steps: 4
+primary_metric: nmse
 
 seed: 0
 log_every_steps: 1

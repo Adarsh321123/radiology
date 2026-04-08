@@ -34,7 +34,7 @@ from dataset import (
     build_val_transform,
     load_and_split,
 )
-from metrics import per_label_auroc
+from metrics import per_label_auroc, per_label_nmse
 from model import CheXpertModel
 
 
@@ -169,15 +169,18 @@ def evaluate(
 
     # Gather across ranks. DistributedSampler pads to equal length per rank
     # so all_gather is safe (may cause a tiny bit of sample duplication in
-    # the final concatenation; negligible for AUROC).
+    # the final concatenation; negligible for AUROC/NMSE).
     all_logits = all_gather_tensor(local_logits, world_size)
     all_labels = all_gather_tensor(local_labels, world_size)
 
-    metrics: Dict[str, float] = {}
+    metrics: Dict[str, Dict[str, float]] = {}
     if is_main(rank):
         yp = torch.sigmoid(all_logits).cpu().numpy()
         yt = all_labels.cpu().numpy()  # contains nan for uncertains
-        metrics = per_label_auroc(yt, yp, cfg.label_names)
+        metrics = {
+            "auroc": per_label_auroc(yt, yp, cfg.label_names),
+            "nmse": per_label_nmse(yt, yp, cfg.label_names),
+        }
     model.train()
     return metrics
 
@@ -278,8 +281,20 @@ def main() -> None:
         )
 
     # -------------------- resume state --------------------
+    # "best" is direction-aware: for nmse lower is better (init +inf),
+    # for auroc higher is better (init -inf).
+    def _worst() -> float:
+        return float("inf") if cfg.primary_metric == "nmse" else float("-inf")
+
+    def _is_better(new: float, cur: float) -> bool:
+        if math.isnan(new):
+            return False
+        if cfg.primary_metric == "nmse":
+            return new < cur
+        return new > cur
+
     global_step = 0
-    best_mean_auc = float("-inf")
+    best_metric = _worst()
     start_epoch = 0
     skip_in_start_epoch = 0
     resume_path = ckpt_dir / "ckpt_last.pt"
@@ -292,9 +307,9 @@ def main() -> None:
         scheduler.load_state_dict(resume_ckpt["scheduler"])
         global_step = int(resume_ckpt["step"])
         start_epoch = int(resume_ckpt["epoch"])
-        bm = resume_ckpt.get("best_mean_auc", float("-inf"))
+        bm = resume_ckpt.get("best_metric", resume_ckpt.get("best_mean_auc", _worst()))
         if isinstance(bm, (int, float)) and math.isfinite(bm):
-            best_mean_auc = float(bm)
+            best_metric = float(bm)
         # Batches already consumed within the start epoch (to fast-forward).
         skip_in_start_epoch = global_step - start_epoch * steps_per_epoch
         if skip_in_start_epoch < 0 or skip_in_start_epoch >= steps_per_epoch:
@@ -305,7 +320,8 @@ def main() -> None:
         if is_main(rank):
             print(
                 f"[rank 0] resumed: step={global_step}  start_epoch={start_epoch+1}  "
-                f"skip_in_epoch={skip_in_start_epoch}  best_mean_auc={best_mean_auc:.4f}",
+                f"skip_in_epoch={skip_in_start_epoch}  "
+                f"best_{cfg.primary_metric}={best_metric:.4f}",
                 flush=True,
             )
     if world_size > 1:
@@ -395,19 +411,28 @@ def main() -> None:
             if global_step % cfg.eval_every_steps == 0 or global_step == total_steps:
                 metrics = evaluate(model, val_loader, device, cfg, world_size, rank)
                 if is_main(rank):
-                    mean_auc = metrics.get("mean", float("nan"))
+                    # metrics is {"auroc": {...}, "nmse": {...}} on rank 0
+                    auroc_metrics = metrics.get("auroc", {})
+                    nmse_metrics = metrics.get("nmse", {})
+                    mean_auc = auroc_metrics.get("mean", float("nan"))
+                    mean_nmse = nmse_metrics.get("mean", float("nan"))
+                    primary_val = mean_nmse if cfg.primary_metric == "nmse" else mean_auc
+
                     window_elapsed = time.time() - accum["t_start"]
                     # Single sync point for all accumulators.
                     loss_avg = (accum["loss_sum"] / max(1, accum["n"])).item()
                     gn_avg = (accum["grad_sum"] / max(1, accum["n"])).item()
-                    # Update best_mean_auc BEFORE writing ckpt_last so the
-                    # saved metadata in ckpt_last.pt reflects the most recent
-                    # best (not the one-eval-stale best).
-                    if not math.isnan(mean_auc) and mean_auc > best_mean_auc:
-                        best_mean_auc = mean_auc
+
+                    # Update best BEFORE writing ckpt_last so the saved
+                    # metadata in ckpt_last.pt reflects the freshest best.
+                    if _is_better(primary_val, best_metric):
+                        best_metric = primary_val
                         best_epoch = epoch + 1
                         best_step = global_step
-                        best_per_label = dict(metrics)
+                        best_per_label = {
+                            "auroc": dict(auroc_metrics),
+                            "nmse": dict(nmse_metrics),
+                        }
                         is_new_best = True
                     else:
                         is_new_best = False
@@ -427,22 +452,31 @@ def main() -> None:
                     }
                     with open(metrics_path, "a") as f:
                         f.write(json.dumps(_json_safe(line)) + "\n")
-                    per_lab = "  ".join(
-                        f"{n.split()[0][:4]}:{metrics.get(n, float('nan')):.3f}"
+
+                    per_lab_auroc = "  ".join(
+                        f"{n.split()[0][:4]}:{auroc_metrics.get(n, float('nan')):.3f}"
+                        for n in cfg.label_names
+                    )
+                    per_lab_nmse = "  ".join(
+                        f"{n.split()[0][:4]}:{nmse_metrics.get(n, float('nan')):.3f}"
                         for n in cfg.label_names
                     )
                     print(
-                        f"[val @ step {global_step}] mean_auc={mean_auc:.4f}  "
-                        f"loss_avg={loss_avg:.4f}  "
-                        f"gn_avg={gn_avg:.2f}  "
-                        f"sps={line['samples_per_sec']:.1f}  |  {per_lab}",
+                        f"[val @ step {global_step}] nmse={mean_nmse:.4f}  auroc={mean_auc:.4f}  "
+                        f"loss_avg={loss_avg:.4f}  gn_avg={gn_avg:.2f}  "
+                        f"sps={line['samples_per_sec']:.1f}",
                         flush=True,
                     )
+                    print(f"  auroc: {per_lab_auroc}", flush=True)
+                    print(f"  nmse : {per_lab_nmse}", flush=True)
 
-                    save_ckpt(ckpt_dir / "ckpt_last.pt", inner, optimizer, scheduler, global_step, epoch, best_mean_auc, cfg)
+                    save_ckpt(ckpt_dir / "ckpt_last.pt", inner, optimizer, scheduler, global_step, epoch, best_metric, cfg)
                     if is_new_best:
-                        save_ckpt(ckpt_dir / "ckpt_best.pt", inner, optimizer, scheduler, global_step, epoch, best_mean_auc, cfg)
-                        print(f"[val @ step {global_step}] new best mean_auc={best_mean_auc:.4f} — saved ckpt_best.pt", flush=True)
+                        save_ckpt(ckpt_dir / "ckpt_best.pt", inner, optimizer, scheduler, global_step, epoch, best_metric, cfg)
+                        print(
+                            f"[val @ step {global_step}] new best {cfg.primary_metric}={best_metric:.4f} — saved ckpt_best.pt",
+                            flush=True,
+                        )
                 # reset eval-window accumulators on every rank
                 accum = fresh_accum()
                 if world_size > 1:
@@ -458,20 +492,32 @@ def main() -> None:
         print("=" * 70, flush=True)
         print(f"TRAINING DONE  total_wall_time={total_time:.0f}s ({total_time/3600:.2f}h)", flush=True)
         if best_step is not None:
-            print(f"best mean_auc = {best_mean_auc:.4f}  @ step {best_step} (epoch {best_epoch})", flush=True)
-            print("per-label AUROC at best:", flush=True)
-            for name in cfg.label_names:
-                v = best_per_label.get(name, float("nan"))
-                v_str = "nan" if not isinstance(v, (int, float)) or math.isnan(v) else f"{v:.4f}"
-                print(f"  {name:30s}  {v_str}", flush=True)
-        elif math.isfinite(best_mean_auc):
             print(
-                f"best mean_auc = {best_mean_auc:.4f}  (from a previous session — "
+                f"best {cfg.primary_metric} = {best_metric:.4f}  "
+                f"@ step {best_step} (epoch {best_epoch})",
+                flush=True,
+            )
+            best_auc = best_per_label.get("auroc", {})
+            best_nmse_pl = best_per_label.get("nmse", {})
+            print(f"{'label':30s}  {'AUROC':>8s}  {'NMSE':>8s}", flush=True)
+            for name in cfg.label_names:
+                a = best_auc.get(name, float("nan"))
+                n_ = best_nmse_pl.get(name, float("nan"))
+                a_str = "nan" if not isinstance(a, (int, float)) or math.isnan(a) else f"{a:.4f}"
+                n_str = "nan" if not isinstance(n_, (int, float)) or math.isnan(n_) else f"{n_:.4f}"
+                print(f"  {name:28s}  {a_str:>8s}  {n_str:>8s}", flush=True)
+            macro_auc = best_auc.get("mean", float("nan"))
+            macro_nmse = best_nmse_pl.get("mean", float("nan"))
+            if isinstance(macro_auc, (int, float)) and isinstance(macro_nmse, (int, float)):
+                print(f"  {'macro mean':28s}  {macro_auc:8.4f}  {macro_nmse:8.4f}", flush=True)
+        elif math.isfinite(best_metric):
+            print(
+                f"best {cfg.primary_metric} = {best_metric:.4f}  (from a previous session — "
                 f"per-label breakdown not tracked across resume)",
                 flush=True,
             )
         else:
-            print("no best checkpoint recorded (all evals returned NaN mean_auc)", flush=True)
+            print(f"no best checkpoint recorded (all evals returned NaN {cfg.primary_metric})", flush=True)
         if (ckpt_dir / "ckpt_best.pt").exists():
             print(f"ckpt_best.pt: {ckpt_dir / 'ckpt_best.pt'}", flush=True)
         print(f"ckpt_last.pt: {ckpt_dir / 'ckpt_last.pt'}", flush=True)
@@ -488,7 +534,7 @@ def save_ckpt(
     scheduler: LambdaLR,
     step: int,
     epoch: int,
-    best_mean_auc: float,
+    best_metric: float,
     cfg: Config,
 ) -> None:
     state = {
@@ -497,7 +543,8 @@ def save_ckpt(
         "scheduler": scheduler.state_dict(),
         "step": step,
         "epoch": epoch,
-        "best_mean_auc": best_mean_auc,
+        "best_metric": best_metric,
+        "primary_metric": cfg.primary_metric,
         "config": cfg.to_dict(),
     }
     tmp = path.with_suffix(path.suffix + ".tmp")

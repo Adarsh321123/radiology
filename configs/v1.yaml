@@ -42,6 +42,8 @@ mixup_alpha: 0.1
 
 # eval / ckpt
 eval_every_steps: 500
+# "nmse" (judge's metric, lower is better) or "auroc"
+primary_metric: nmse
 
 # misc
 seed: 0

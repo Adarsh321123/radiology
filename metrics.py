@@ -1,4 +1,4 @@
-"""Per-label AUROC with NaN-masking for uncertain val examples."""
+"""Per-label AUROC and variance-normalized MSE, with NaN-masking for uncertain val examples."""
 from __future__ import annotations
 
 import math
@@ -45,5 +45,50 @@ def per_label_auroc(
         out[name] = auc
         if not math.isnan(auc):
             valid.append(auc)
+    out["mean"] = float(np.mean(valid)) if valid else math.nan
+    return out
+
+
+def per_label_nmse(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    label_names: List[str],
+    *,
+    min_samples: int = 10,
+) -> Dict[str, float]:
+    """Compute per-label variance-normalized MSE (NMSE = MSE / Var(y)).
+
+    y_true : (N, num_labels) with values in {0, 1, nan}. nan = uncertain, skipped.
+    y_pred : (N, num_labels) real-valued scores in [0, 1] (sigmoid probabilities).
+
+    NMSE semantics:
+      0.0  = perfect predictions
+      1.0  = no better than always predicting the per-label mean
+      >1.0 = worse than the constant-mean baseline
+    Lower is better.
+
+    Labels with fewer than ``min_samples`` clean entries, or zero
+    variance, get ``nan`` and are skipped in the mean.
+    """
+    assert y_true.shape == y_pred.shape, f"{y_true.shape} vs {y_pred.shape}"
+    out: Dict[str, float] = {}
+    valid: List[float] = []
+    for i, name in enumerate(label_names):
+        yt = y_true[:, i]
+        yp = y_pred[:, i]
+        mask = ~np.isnan(yt)
+        yt_m = yt[mask]
+        yp_m = yp[mask]
+        if len(yt_m) < min_samples:
+            out[name] = math.nan
+            continue
+        mse = float(np.mean((yt_m - yp_m) ** 2))
+        var = float(np.var(yt_m))
+        if var <= 0:
+            out[name] = math.nan
+            continue
+        nmse = mse / var
+        out[name] = nmse
+        valid.append(nmse)
     out["mean"] = float(np.mean(valid)) if valid else math.nan
     return out

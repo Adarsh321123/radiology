@@ -55,14 +55,23 @@ class SubmitDataset(Dataset):
 def load_model(ckpt_path: Path, device: torch.device) -> Tuple[CheXpertModel, Config, dict]:
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     cfg_dict = ckpt["config"]
+    # Drop unknown keys so older checkpoints still load after the config
+    # schema grows.
+    known = {f.name for f in Config.__dataclass_fields__.values()}
+    cfg_dict = {k: v for k, v in cfg_dict.items() if k in known}
     cfg = Config(**cfg_dict)
     model = CheXpertModel(cfg)
     model.load_state_dict(ckpt["model"], strict=True)
     model.to(device).eval()
+    # Support both new ("best_metric" + "primary_metric") and old
+    # ("best_mean_auc") checkpoint formats.
+    best_metric = ckpt.get("best_metric", ckpt.get("best_mean_auc"))
+    primary = ckpt.get("primary_metric", "auroc")
     meta = {
         "step": ckpt.get("step"),
         "epoch": ckpt.get("epoch"),
-        "best_mean_auc": ckpt.get("best_mean_auc"),
+        "primary_metric": primary,
+        "best_metric": best_metric,
     }
     return model, cfg, meta
 
@@ -84,7 +93,11 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"loading ckpt: {args.ckpt}", flush=True)
     model, cfg, meta = load_model(args.ckpt, device)
-    print(f"  trained step={meta['step']}  epoch={meta['epoch']}  best_mean_auc={meta['best_mean_auc']}", flush=True)
+    print(
+        f"  trained step={meta['step']}  epoch={meta['epoch']}  "
+        f"best_{meta['primary_metric']}={meta['best_metric']}",
+        flush=True,
+    )
 
     # test set
     df = pd.read_csv(cfg.test_ids_csv)
