@@ -69,8 +69,8 @@ class Config:
     epochs: int = 5
     batch_size_per_gpu: int = 8  # global 32 on 4× H100 (bs=16 OOMs at 768²)
     num_workers: int = 8
-    lr_head: float = 1e-3
-    lr_backbone: float = 1e-5
+    lr_head: float = 2e-5
+    lr_backbone: float = 1e-6
     weight_decay: float = 0.05
     warmup_ratio: float = 0.05
     grad_clip: float = 1.0
