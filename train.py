@@ -116,14 +116,20 @@ def mixup_batch(
     """Multi-label mixup: blend image pairs and label pairs by lam ~ Beta(a, a).
 
     Works natively with BCE (fractional targets are valid).
+    NaN-aware: if either sample in a pair has NaN for a label, the mixed
+    label is set to NaN (will be masked from loss).
     """
     if alpha <= 0:
         return x, y
     lam = float(np.random.beta(alpha, alpha))
     perm = torch.randperm(x.size(0), device=x.device)
     x = lam * x + (1.0 - lam) * x[perm]
-    y = lam * y + (1.0 - lam) * y[perm]
-    return x, y
+    # NaN-aware label mixing: propagate NaN from either source
+    y_perm = y[perm]
+    nan_either = torch.isnan(y) | torch.isnan(y_perm)
+    y_mixed = lam * y.nan_to_num(0.0) + (1.0 - lam) * y_perm.nan_to_num(0.0)
+    y_mixed[nan_either] = float("nan")
+    return x, y_mixed
 
 
 # --------------------------------------------------------------------------- #
@@ -375,7 +381,21 @@ def main() -> None:
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = model(x)
-                loss = F.binary_cross_entropy_with_logits(logits, y)
+                # Mask NaN labels (from "ignore" uncertain strategy).
+                # Replace NaN targets with 0 and zero out those positions in the loss.
+                nan_mask = torch.isnan(y)
+                if nan_mask.any():
+                    y_safe = y.clone()
+                    y_safe[nan_mask] = 0.0
+                    per_elem_loss = F.binary_cross_entropy_with_logits(
+                        logits, y_safe, reduction="none",
+                    )
+                    per_elem_loss[nan_mask] = 0.0
+                    # Mean over non-masked elements
+                    n_valid = (~nan_mask).sum()
+                    loss = per_elem_loss.sum() / n_valid.clamp(min=1)
+                else:
+                    loss = F.binary_cross_entropy_with_logits(logits, y)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

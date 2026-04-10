@@ -1,0 +1,46 @@
+# HPC config: same as v1 but with correct HPC paths.
+# Launch: sbatch train.sh
+
+run_name: v1_hpc
+runs_root: /resnick/groups/CS156b/from_central/runs
+
+# data (HPC paths)
+data_root: /resnick/groups/CS156b/from_central/data
+labels_csv: /resnick/groups/CS156b/from_central/data/student_labels/train2023.csv
+test_ids_csv: /resnick/groups/CS156b/from_central/data/student_labels/test_ids.csv
+val_frac: 0.1
+split_seed: 42
+
+# image
+image_size: 768
+crop_scale_min: 0.85
+crop_scale_max: 1.0
+rotation_deg: 10.0
+brightness: 0.2
+contrast: 0.2
+
+# model
+dinov3_repo: /data/artifacts/frank/misc/dinov3_repo
+dinov3_arch: dinov3_vith16plus
+dinov3_weights: /data/artifacts/frank/misc/labels/dino/dinov3_hplus.pth
+head_type: attention
+attn_pool_heads: 8
+
+# optimization
+epochs: 5
+batch_size_per_gpu: 8
+num_workers: 8
+lr_head: 2.0e-5
+lr_backbone: 1.0e-6
+weight_decay: 0.05
+warmup_ratio: 0.05
+grad_clip: 1.0
+mixup_alpha: 0.1
+
+# eval / ckpt
+eval_every_steps: 500
+primary_metric: nmse
+
+# misc
+seed: 0
+log_every_steps: 20

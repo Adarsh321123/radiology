@@ -87,12 +87,18 @@ def _labels_to_array(
     label_names: List[str],
     *,
     mode: str,
+    uncertain_strategy: dict | None = None,
 ) -> np.ndarray:
     """Return (N, num_labels) float32 label array.
 
     mode="u_ones"  : 1→1, 0(unc)→1, -1(neg)→0, blank→0
     mode="u_zeros" : 1→1, 0(unc)→0, -1(neg)→0, blank→0
     mode="val"     : 1→1, 0(unc)→nan (mask sentinel), -1(neg)→0, blank→0
+    mode="per_label": uses uncertain_strategy dict to handle each label differently.
+                      Labels not in the dict default to "ones".
+                      "ignore" maps uncertain→nan (masked from loss via loss_mask).
+
+    uncertain_strategy: dict mapping label name → "ones"/"zeros"/"ignore".
     """
     cols = df[label_names].copy()
     arr = cols.to_numpy(dtype=np.float32)  # blank → NaN
@@ -113,6 +119,20 @@ def _labels_to_array(
         out[is_unc] = 0.0  # already 0
     elif mode == "val":
         out[is_unc] = np.nan  # masked during AUROC
+    elif mode == "per_label":
+        if uncertain_strategy is None:
+            uncertain_strategy = {}
+        for i, name in enumerate(label_names):
+            strategy = uncertain_strategy.get(name, "ones")
+            col_unc = is_unc[:, i]
+            if strategy == "ones":
+                out[col_unc, i] = 1.0
+            elif strategy == "zeros":
+                out[col_unc, i] = 0.0
+            elif strategy == "ignore":
+                out[col_unc, i] = np.nan  # will be masked from loss
+            else:
+                raise ValueError(f"unknown uncertain strategy for {name}: {strategy!r}")
     else:
         raise ValueError(f"unknown labeling mode: {mode}")
 
@@ -149,7 +169,14 @@ def load_and_split(
     df_val = df[in_val].reset_index(drop=True)
     df_train = df[~in_val].reset_index(drop=True)
 
-    y_train = _labels_to_array(df_train, cfg.label_names, mode="u_ones")
+    if cfg.uncertain_strategy:
+        y_train = _labels_to_array(
+            df_train, cfg.label_names,
+            mode="per_label",
+            uncertain_strategy=cfg.uncertain_strategy,
+        )
+    else:
+        y_train = _labels_to_array(df_train, cfg.label_names, mode="u_ones")
     y_val = _labels_to_array(df_val, cfg.label_names, mode="val")
     return df_train, df_val, y_train, y_val
 

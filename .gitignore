@@ -27,3 +27,9 @@ slurm-*.out
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# Internal docs — never push
+BRIEFING_*.md
+
+# Data
+data/

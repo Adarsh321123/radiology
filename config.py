@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 # The 9 labels in train2023.csv, in the exact order expected by the submission CSV.
@@ -52,6 +52,13 @@ class Config:
     num_labels: int = 9
     # Train: U-Ones (map -1 → 1, blank → 0).
     # Val: keep -1 as-is; mask per-label during AUROC so only {0, 1} contribute.
+    #
+    # Per-label uncertain handling: a dict mapping label name to strategy.
+    # Strategies: "ones" (uncertain→1), "zeros" (uncertain→0),
+    #             "ignore" (uncertain→nan, masked from loss).
+    # Labels not listed default to "ones" (U-Ones).
+    # Example: {"Pneumonia": "ignore", "Pleural Other": "ignore"}
+    uncertain_strategy: Optional[dict] = None
 
     # --- model ---
     # Native DINOv3 loader: we call torch.hub.load on a local clone of

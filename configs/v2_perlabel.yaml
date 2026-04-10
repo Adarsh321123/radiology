@@ -1,0 +1,57 @@
+# v2: Per-label uncertain handling.
+# Key change: Pneumonia and Pleural Other use "ignore" (mask uncertain from loss)
+# instead of U-Ones. These two labels have the most noise from uncertain labels:
+#   - Pneumonia: 2,706 true positives but 17,174 uncertain (6x more noise than signal)
+#   - Pleural Other: 2,957 positives, 2,360 uncertain (nearly 1:1 noise)
+# Fracture also uses "ignore" (1,072 uncertain vs 6,877 positive — modest noise).
+
+run_name: v2_perlabel
+runs_root: /data/artifacts/frank/misc/runs
+
+# data
+data_root: /data/artifacts/frank/misc
+labels_csv: /data/artifacts/frank/misc/labels/train2023.csv
+test_ids_csv: /data/artifacts/frank/misc/labels/test_ids.csv
+val_frac: 0.1
+split_seed: 42
+
+# image
+image_size: 768
+crop_scale_min: 0.85
+crop_scale_max: 1.0
+rotation_deg: 10.0
+brightness: 0.2
+contrast: 0.2
+
+# model
+dinov3_repo: /data/artifacts/frank/misc/dinov3_repo
+dinov3_arch: dinov3_vith16plus
+dinov3_weights: /data/artifacts/frank/misc/labels/dino/dinov3_hplus.pth
+head_type: attention
+attn_pool_heads: 8
+
+# Per-label uncertain handling.
+# Labels not listed default to "ones" (U-Ones, same as v1).
+uncertain_strategy:
+  Pneumonia: "ignore"
+  Pleural Other: "ignore"
+  Fracture: "ignore"
+
+# optimization — same as v1
+epochs: 5
+batch_size_per_gpu: 8
+num_workers: 8
+lr_head: 2.0e-5
+lr_backbone: 1.0e-6
+weight_decay: 0.05
+warmup_ratio: 0.05
+grad_clip: 1.0
+mixup_alpha: 0.1
+
+# eval / ckpt
+eval_every_steps: 500
+primary_metric: nmse
+
+# misc
+seed: 0
+log_every_steps: 20
