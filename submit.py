@@ -162,14 +162,17 @@ def run_inference(
     loader: DataLoader,
     device: torch.device,
 ) -> Tuple[List[int], np.ndarray]:
-    """Run inference, return (ids, logits) — logits not sigmoided yet."""
+    """Run inference, return (ids, logits) — logits not sigmoided yet.
+
+    Runs in native FP32 (no autocast) for bit-reproducible outputs. Slower,
+    but eliminates a source of run-to-run drift in submission CSVs.
+    """
     all_ids: List[int] = []
     all_logits: List[np.ndarray] = []
     with torch.no_grad():
         for ids, x in loader:
             x = x.to(device, non_blocking=True)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(x)
+            logits = model(x)
             all_logits.append(logits.float().cpu().numpy())
             all_ids.extend([int(i) for i in ids])
     return all_ids, np.concatenate(all_logits, axis=0)
@@ -242,7 +245,28 @@ def derive_no_finding(
     return probs
 
 
+def _set_deterministic() -> None:
+    """Force bit-reproducible inference: same ckpt + same args = same CSV.
+
+    Without these, CuDNN/cuBLAS heuristics and TF32 pick different kernels
+    run-to-run, which compounds through a 840M ViT into per-row prediction
+    drift visible in submission CSVs.
+    """
+    import os
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    np.random.seed(0)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+
 def main() -> None:
+    _set_deterministic()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True, type=Path, nargs="+",
                     help="path(s) to checkpoint(s). Multiple = ensemble.")
