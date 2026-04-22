@@ -365,7 +365,9 @@ def main() -> None:
     # Sigmoid
     probs = 1.0 / (1.0 + np.exp(-logits))
 
-    # Derived No Finding (applied after sigmoid)
+    # Derived No Finding (applied after sigmoid, operates on the FULL label
+    # set so 14-label aux training can use all 13 non-NF pathologies in the
+    # product, which is more semantically correct than only the 8 scored ones).
     if args.derive_no_finding is not None:
         alpha = args.derive_no_finding
         probs = derive_no_finding(probs, cfg.label_names, alpha)
@@ -381,14 +383,22 @@ def main() -> None:
     if probs.shape[0] != len(all_ids):
         raise RuntimeError(f"probs rows={probs.shape[0]} != ids={len(all_ids)}")
 
+    # --- Slice to scored columns only ---
+    # In 9-label mode, effective_scored_labels == label_names, so this is a
+    # no-op slice. In 14-label aux mode, this drops the 5 auxiliary columns
+    # so the submission CSV only contains the 9 leaderboard-scored labels.
+    scored_labels = cfg.effective_scored_labels
+    scored_idx = cfg.scored_indices
+    probs_scored = probs[:, scored_idx]
+
     # --- Write submission CSV ---
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Id"] + cfg.label_names)
-        for i, p in zip(all_ids, probs):
+        writer.writerow(["Id"] + scored_labels)
+        for i, p in zip(all_ids, probs_scored):
             writer.writerow([i] + [f"{v:.6f}" for v in p])
-    print(f"wrote {args.out}  ({len(all_ids)} rows)", flush=True)
+    print(f"wrote {args.out}  ({len(all_ids)} rows, {len(scored_labels)} label cols)", flush=True)
 
 
 if __name__ == "__main__":

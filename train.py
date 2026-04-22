@@ -183,9 +183,17 @@ def evaluate(
     if is_main(rank):
         yp = torch.sigmoid(all_logits).cpu().numpy()
         yt = all_labels.cpu().numpy()  # contains nan for uncertains
+        # Restrict metrics to the leaderboard-scored labels. In 9-label mode,
+        # this is a no-op (scored == label_names). In 14-label aux mode, this
+        # drops the 5 aux columns so the primary metric reflects leaderboard
+        # scoring only.
+        scored_idx = cfg.scored_indices
+        scored_names = cfg.effective_scored_labels
+        yp_s = yp[:, scored_idx]
+        yt_s = yt[:, scored_idx]
         metrics = {
-            "auroc": per_label_auroc(yt, yp, cfg.label_names),
-            "nmse": per_label_nmse(yt, yp, cfg.label_names),
+            "auroc": per_label_auroc(yt_s, yp_s, scored_names),
+            "nmse": per_label_nmse(yt_s, yp_s, scored_names),
         }
     model.train()
     return metrics
@@ -475,11 +483,11 @@ def main() -> None:
 
                     per_lab_auroc = "  ".join(
                         f"{n.split()[0][:4]}:{auroc_metrics.get(n, float('nan')):.3f}"
-                        for n in cfg.label_names
+                        for n in cfg.effective_scored_labels
                     )
                     per_lab_nmse = "  ".join(
                         f"{n.split()[0][:4]}:{nmse_metrics.get(n, float('nan')):.3f}"
-                        for n in cfg.label_names
+                        for n in cfg.effective_scored_labels
                     )
                     print(
                         f"[val @ step {global_step}] nmse={mean_nmse:.4f}  auroc={mean_auc:.4f}  "
@@ -520,7 +528,7 @@ def main() -> None:
             best_auc = best_per_label.get("auroc", {})
             best_nmse_pl = best_per_label.get("nmse", {})
             print(f"{'label':30s}  {'AUROC':>8s}  {'NMSE':>8s}", flush=True)
-            for name in cfg.label_names:
+            for name in cfg.effective_scored_labels:
                 a = best_auc.get(name, float("nan"))
                 n_ = best_nmse_pl.get(name, float("nan"))
                 a_str = "nan" if not isinstance(a, (int, float)) or math.isnan(a) else f"{a:.4f}"

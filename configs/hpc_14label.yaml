@@ -1,0 +1,89 @@
+# 14-label auxiliary training.
+#
+# Train on all 14 CheXpert pathology labels (9 scored + 5 aux: Lung Lesion,
+# Edema, Consolidation, Atelectasis, Pneumothorax). The 5 aux labels act as
+# auxiliary supervision on the shared backbone. Val NMSE and submission CSV
+# only include the 9 scored labels.
+#
+# Every other training knob (backbone, image size, batch size, LR schedule,
+# mixup, etc.) is identical to hpc.yaml. Single-variable ablation.
+
+run_name: v14_hpc
+runs_root: /resnick/groups/CS156b/from_central/2026/scalm/runs
+
+# data (14-label CSV)
+data_root: /resnick/groups/CS156b/from_central/data
+labels_csv: /resnick/groups/CS156b/from_central/data/student_labels/train.csv
+test_ids_csv: /resnick/groups/CS156b/from_central/data/student_labels/test_ids.csv
+val_frac: 0.1
+split_seed: 42
+
+# image (same as hpc.yaml)
+image_size: 768
+crop_scale_min: 0.85
+crop_scale_max: 1.0
+rotation_deg: 10.0
+brightness: 0.2
+contrast: 0.2
+
+# labels: 14 trained, 9 scored
+# First 9 match LABEL_NAMES in config.py (submission ordering).
+# Last 5 are auxiliary; the 5 extra pathologies in train.csv.
+num_labels: 14
+label_names:
+  - No Finding
+  - Enlarged Cardiomediastinum
+  - Cardiomegaly
+  - Lung Opacity
+  - Pneumonia
+  - Pleural Effusion
+  - Pleural Other
+  - Fracture
+  - Support Devices
+  - Lung Lesion
+  - Edema
+  - Consolidation
+  - Atelectasis
+  - Pneumothorax
+
+# Only the 9 scored labels drive val NMSE and get written to the submission CSV.
+scored_label_names:
+  - No Finding
+  - Enlarged Cardiomediastinum
+  - Cardiomegaly
+  - Lung Opacity
+  - Pneumonia
+  - Pleural Effusion
+  - Pleural Other
+  - Fracture
+  - Support Devices
+
+# Uncertain-handling: all 14 labels default to U-Ones (map uncertain to
+# positive). No per-label overrides in this run; aux labels are new so we
+# don't want to over-engineer them yet.
+
+# model (same as hpc.yaml)
+dinov3_repo: /resnick/groups/CS156b/from_central/2026/scalm/dinov3_repo
+dinov3_arch: dinov3_vith16plus
+dinov3_weights: /resnick/groups/CS156b/from_central/2026/scalm/dinov3_hplus.pth
+head_type: attention
+attn_pool_heads: 8
+
+# optimization (same as hpc.yaml)
+epochs: 5
+batch_size_per_gpu: 8
+num_workers: 8
+lr_head: 2.0e-5
+lr_backbone: 1.0e-6
+weight_decay: 0.05
+warmup_ratio: 0.05
+grad_clip: 1.0
+mixup_alpha: 0.1
+
+# eval / ckpt (same as hpc.yaml)
+eval_every_steps: 500
+primary_metric: nmse
+
+# misc (same as hpc.yaml)
+seed: 0
+log_every_steps: 20

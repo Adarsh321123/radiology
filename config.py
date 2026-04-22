@@ -48,8 +48,16 @@ class Config:
     contrast: float = 0.2
 
     # --- labels ---
+    # label_names: every label the MODEL is trained on. Default is the 9 scored
+    # labels. For 14-label aux training, set this to the full 14-label list
+    # (9 scored + 5 aux). num_labels must match len(label_names).
     label_names: List[str] = field(default_factory=lambda: list(LABEL_NAMES))
     num_labels: int = 9
+    # scored_label_names: the subset of label_names that the LEADERBOARD cares
+    # about. Used for val metric computation and submission CSV output. If
+    # None, falls back to label_names (existing 9-label behavior). For 14-label
+    # aux training, set this to the 9 scored labels.
+    scored_label_names: Optional[List[str]] = None
     # Train: U-Ones (map -1 → 1, blank → 0).
     # Val: keep -1 as-is; mask per-label during AUROC so only {0, 1} contribute.
     #
@@ -103,6 +111,31 @@ class Config:
     @property
     def run_dir(self) -> Path:
         return Path(self.runs_root) / self.run_name
+
+    @property
+    def effective_scored_labels(self) -> List[str]:
+        """Labels used for val metrics and submission output.
+
+        Falls back to label_names when scored_label_names is not set, so
+        existing 9-label configs behave identically to before.
+        """
+        return list(self.scored_label_names) if self.scored_label_names else list(self.label_names)
+
+    @property
+    def scored_indices(self) -> List[int]:
+        """Indices of effective_scored_labels within label_names.
+
+        Used to slice model outputs (num_labels wide) down to the scored
+        subset for metrics and submission.
+        """
+        scored = self.effective_scored_labels
+        name_to_idx = {n: i for i, n in enumerate(self.label_names)}
+        missing = [n for n in scored if n not in name_to_idx]
+        if missing:
+            raise ValueError(
+                f"scored_label_names contains labels not in label_names: {missing}"
+            )
+        return [name_to_idx[n] for n in scored]
 
     def to_dict(self) -> dict:
         return asdict(self)
