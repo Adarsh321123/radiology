@@ -58,17 +58,28 @@ class Config:
     # None, falls back to label_names (existing 9-label behavior). For 14-label
     # aux training, set this to the 9 scored labels.
     scored_label_names: Optional[List[str]] = None
-    # Train: U-Ones (map -1 → 1, blank → 0).
-    # Val: keep -1 as-is; mask per-label during AUROC so only {0, 1} contribute.
+    # Train defaults to the original U-Ones setup: uncertain -> 1,
+    # blank/unmentioned -> 0. For score-aligned experiments, set
+    # default_uncertain_strategy="ignore" and blank_strategy="ignore".
+    #
+    # Val always masks uncertain labels. blank_strategy controls whether
+    # blank/unmentioned val labels are counted as negatives ("zeros", legacy)
+    # or excluded from metrics ("ignore", score-aligned).
     #
     # Per-label uncertain handling: a dict mapping label name to strategy.
     # Strategies: "ones" (uncertain→1), "zeros" (uncertain→0),
     #             "ignore" (uncertain→nan, masked from loss).
-    # Labels not listed default to "ones" (U-Ones).
+    # Labels not listed default to default_uncertain_strategy.
     # Example: {"Pneumonia": "ignore", "Pleural Other": "ignore"}
+    default_uncertain_strategy: str = "ones"
+    blank_strategy: str = "zeros"
     uncertain_strategy: Optional[dict] = None
 
     # --- model ---
+    # model_type: "dinov3" (original ViT-H+) or "densenet121" (torchvision).
+    model_type: str = "dinov3"
+    # DenseNet-121 settings
+    dropout: float = 0.5
     # Native DINOv3 loader: we call torch.hub.load on a local clone of
     # facebookresearch/dinov3 and point at a downloaded .pth. The HF repo
     # is gated; bypassing HF avoids the access barrier.
@@ -90,6 +101,16 @@ class Config:
     warmup_ratio: float = 0.05
     grad_clip: float = 1.0
     mixup_alpha: float = 0.1  # Beta(a, a); 0 disables
+    # "micro" matches the original code: average BCE across every valid
+    # (sample, label) element. "macro" averages valid elements per label,
+    # then averages labels equally; useful when blanks are masked and label
+    # density differs by orders of magnitude.
+    loss_reduction: str = "micro"
+    # "binary" (default): train targets are 0/1, loss is BCE, submit sigmoid probs.
+    # "raw": train targets are -1/0/1, loss is MSE, submit clipped linear outputs.
+    target_type: str = "binary"
+    # "bce" (default for binary), "mse" (default for raw), "smooth_l1"
+    loss_fn: str = "bce"
 
     # --- eval / ckpt ---
     eval_every_steps: int = 500

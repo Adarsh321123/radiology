@@ -9,7 +9,7 @@
 # mixup, etc.) is identical to hpc.yaml. Single-variable ablation.
 
 run_name: v14_hpc
-runs_root: /resnick/groups/CS156b/from_central/2026/scalm/runs
+runs_root: /resnick/groups/CS156b/from_central/2026/scalm_akumarap/runs
 
 # data (14-label CSV)
 data_root: /resnick/groups/CS156b/from_central/data
@@ -63,9 +63,9 @@ scored_label_names:
 # don't want to over-engineer them yet.
 
 # model (same as hpc.yaml)
-dinov3_repo: /resnick/groups/CS156b/from_central/2026/scalm/dinov3_repo
+dinov3_repo: /resnick/groups/CS156b/from_central/2026/scalm_akumarap/dinov3_repo
 dinov3_arch: dinov3_vith16plus
-dinov3_weights: /resnick/groups/CS156b/from_central/2026/scalm/dinov3_hplus.pth
+dinov3_weights: /resnick/groups/CS156b/from_central/2026/scalm_akumarap/dinov3_hplus.pth
 head_type: attention
 attn_pool_heads: 8
 

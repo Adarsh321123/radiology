@@ -1,0 +1,41 @@
+# DenseNet-121 trained on raw -1/0/1 targets with MSE loss, seed 0
+run_name: raw_mse_s1
+runs_root: /resnick/groups/CS156b/from_central/2026/scalm_akumarap/runs
+
+data_root: /resnick/groups/CS156b/from_central/data
+labels_csv: /resnick/groups/CS156b/from_central/data/student_labels/train2023.csv
+test_ids_csv: /resnick/groups/CS156b/from_central/data/student_labels/test_ids.csv
+val_frac: 0.1
+split_seed: 42
+
+image_size: 224
+crop_scale_min: 0.9
+crop_scale_max: 1.0
+rotation_deg: 10.0
+brightness: 0.2
+contrast: 0.2
+
+model_type: densenet121
+dropout: 0.5
+
+# Raw target training
+target_type: raw
+loss_fn: mse
+blank_strategy: ignore
+
+epochs: 8
+batch_size_per_gpu: 32
+num_workers: 8
+lr_head: 1.0e-3
+lr_backbone: 1.0e-4
+weight_decay: 1.0e-4
+warmup_ratio: 0.05
+grad_clip: 1.0
+mixup_alpha: 0.0
+loss_reduction: micro
+
+eval_every_steps: 2000
+primary_metric: nmse
+
+seed: 1
+log_every_steps: 20

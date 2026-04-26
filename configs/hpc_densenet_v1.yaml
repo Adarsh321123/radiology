@@ -1,0 +1,50 @@
+# DenseNet-121 vanilla baseline (Step 1 of pivot plan)
+# Launch: sbatch --gres=gpu:nvidia_h200:1 --cpus-per-task=16 --mem=64G \
+#   --time=12:00:00 -A cs156b -p gpu -J dn121_v1 \
+#   -o train_%j.out \
+#   --wrap="export PATH=$HOME/.local/bin:$PATH && uv run python -u train.py --config configs/hpc_densenet_v1.yaml"
+
+run_name: densenet_v1
+runs_root: /resnick/groups/CS156b/from_central/2026/scalm_akumarap/runs
+
+# data (HPC paths)
+data_root: /resnick/groups/CS156b/from_central/data
+labels_csv: /resnick/groups/CS156b/from_central/data/student_labels/train2023.csv
+test_ids_csv: /resnick/groups/CS156b/from_central/data/student_labels/test_ids.csv
+val_frac: 0.1
+split_seed: 42
+
+# image
+image_size: 224
+crop_scale_min: 0.9
+crop_scale_max: 1.0
+rotation_deg: 10.0
+brightness: 0.2
+contrast: 0.2
+
+# model
+model_type: densenet121
+dropout: 0.5
+
+# optimization
+epochs: 15
+batch_size_per_gpu: 32
+num_workers: 8
+lr_head: 1.0e-3
+lr_backbone: 1.0e-4
+weight_decay: 1.0e-4
+warmup_ratio: 0.05
+grad_clip: 1.0
+mixup_alpha: 0.0
+
+# labels
+default_uncertain_strategy: ones
+blank_strategy: zeros
+
+# eval / ckpt
+eval_every_steps: 500
+primary_metric: nmse
+
+# misc
+seed: 0
+log_every_steps: 20

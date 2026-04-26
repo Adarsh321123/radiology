@@ -3,17 +3,16 @@
 Label conventions (verified against the 2023 CSV, which uses a convention
 that does NOT match the upstream Stanford paper):
 
-    raw csv value   meaning            U-Ones  U-Zeros  U-Ignore
-    -------------   ----------------   ------  -------  --------
-    1.0             positive              1       1        1
-    0.0             UNCERTAIN             1       0      (mask)
-    -1.0            NEGATIVE              0       0        0
-    blank           unmentioned           0       0        0
+    raw csv value   meaning            ones  zeros  ignore
+    -------------   ----------------   ----  -----  ------
+    1.0             positive             1      1      1
+    0.0             UNCERTAIN            1      0    (mask)
+    -1.0            NEGATIVE             0      0      0
+    blank           unmentioned          0      0    (mask, when configured)
 
-Train uses U-Ones by default (uncertain → positive).
-Val preserves the uncertain value as a sentinel (``nan``) so the AUROC
-computation can mask uncertains per-label and compute AUC only over
-clean {0, 1} examples.
+Train uses U-Ones by default (uncertain → positive, blank → negative).
+Score-aligned configs can instead mask uncertain and blank labels with
+``nan``. Val always masks uncertain labels, and optionally masks blanks.
 
 Images are loaded as grayscale JPEGs at native resolution (commonly 2022²),
 duplicated across 3 channels via PIL's ``convert("RGB")``, and fed through
@@ -88,17 +87,21 @@ def _labels_to_array(
     *,
     mode: str,
     uncertain_strategy: dict | None = None,
+    default_uncertain_strategy: str = "ones",
+    blank_strategy: str = "zeros",
 ) -> np.ndarray:
     """Return (N, num_labels) float32 label array.
 
-    mode="u_ones"  : 1→1, 0(unc)→1, -1(neg)→0, blank→0
-    mode="u_zeros" : 1→1, 0(unc)→0, -1(neg)→0, blank→0
-    mode="val"     : 1→1, 0(unc)→nan (mask sentinel), -1(neg)→0, blank→0
+    mode="u_ones"  : 1→1, 0(unc)→1, -1(neg)→0, blank per blank_strategy
+    mode="u_zeros" : 1→1, 0(unc)→0, -1(neg)→0, blank per blank_strategy
+    mode="val"     : 1→1, 0(unc)→nan, -1(neg)→0, blank per blank_strategy
     mode="per_label": uses uncertain_strategy dict to handle each label differently.
-                      Labels not in the dict default to "ones".
+                      Labels not in the dict default to default_uncertain_strategy.
                       "ignore" maps uncertain→nan (masked from loss via loss_mask).
 
     uncertain_strategy: dict mapping label name → "ones"/"zeros"/"ignore".
+    default_uncertain_strategy: fallback for uncertain labels not listed in the dict.
+    blank_strategy: "zeros" for legacy blank-as-negative, "ignore" to mask blanks.
     """
     cols = df[label_names].copy()
     arr = cols.to_numpy(dtype=np.float32)  # blank → NaN
@@ -109,9 +112,22 @@ def _labels_to_array(
     is_neg   = (arr == -1.0)
     is_blank = np.isnan(arr)
 
+    def apply_strategy(out_col: np.ndarray, mask: np.ndarray, strategy: str, label: str) -> None:
+        if strategy == "ones":
+            out_col[mask] = 1.0
+        elif strategy == "zeros":
+            out_col[mask] = 0.0
+        elif strategy == "ignore":
+            out_col[mask] = np.nan
+        else:
+            raise ValueError(f"unknown label strategy for {label}: {strategy!r}")
+
     out = np.zeros_like(arr, dtype=np.float32)
     out[is_pos] = 1.0
-    # is_neg and is_blank → 0 (default)
+    # is_neg and legacy blanks -> 0 (default)
+
+    for i, name in enumerate(label_names):
+        apply_strategy(out[:, i], is_blank[:, i], blank_strategy, f"{name} blank")
 
     if mode == "u_ones":
         out[is_unc] = 1.0
@@ -123,20 +139,22 @@ def _labels_to_array(
         if uncertain_strategy is None:
             uncertain_strategy = {}
         for i, name in enumerate(label_names):
-            strategy = uncertain_strategy.get(name, "ones")
-            col_unc = is_unc[:, i]
-            if strategy == "ones":
-                out[col_unc, i] = 1.0
-            elif strategy == "zeros":
-                out[col_unc, i] = 0.0
-            elif strategy == "ignore":
-                out[col_unc, i] = np.nan  # will be masked from loss
-            else:
-                raise ValueError(f"unknown uncertain strategy for {name}: {strategy!r}")
+            strategy = uncertain_strategy.get(name, default_uncertain_strategy)
+            apply_strategy(out[:, i], is_unc[:, i], strategy, name)
     else:
         raise ValueError(f"unknown labeling mode: {mode}")
 
     return out.astype(np.float32)
+
+
+def _labels_to_raw_array(
+    df: pd.DataFrame,
+    label_names: List[str],
+) -> np.ndarray:
+    """Return (N, num_labels) with raw -1/0/1 values. Blanks -> NaN (masked)."""
+    cols = df[label_names].copy()
+    arr = cols.to_numpy(dtype=np.float32)  # blank -> NaN, keeps -1/0/1
+    return arr
 
 
 def load_and_split(
@@ -169,15 +187,30 @@ def load_and_split(
     df_val = df[in_val].reset_index(drop=True)
     df_train = df[~in_val].reset_index(drop=True)
 
-    if cfg.uncertain_strategy:
-        y_train = _labels_to_array(
-            df_train, cfg.label_names,
-            mode="per_label",
-            uncertain_strategy=cfg.uncertain_strategy,
-        )
+    if cfg.target_type == "raw":
+        y_train = _labels_to_raw_array(df_train, cfg.label_names)
+        y_val = _labels_to_raw_array(df_val, cfg.label_names)
     else:
-        y_train = _labels_to_array(df_train, cfg.label_names, mode="u_ones")
-    y_val = _labels_to_array(df_val, cfg.label_names, mode="val")
+        custom_train_labels = (
+            cfg.uncertain_strategy
+            or cfg.default_uncertain_strategy != "ones"
+            or cfg.blank_strategy != "zeros"
+        )
+        if custom_train_labels:
+            y_train = _labels_to_array(
+                df_train, cfg.label_names,
+                mode="per_label",
+                uncertain_strategy=cfg.uncertain_strategy,
+                default_uncertain_strategy=cfg.default_uncertain_strategy,
+                blank_strategy=cfg.blank_strategy,
+            )
+        else:
+            y_train = _labels_to_array(df_train, cfg.label_names, mode="u_ones")
+        y_val = _labels_to_array(
+            df_val, cfg.label_names,
+            mode="val",
+            blank_strategy=cfg.blank_strategy,
+        )
     return df_train, df_val, y_train, y_val
 
 

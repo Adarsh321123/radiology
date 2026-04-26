@@ -141,7 +141,7 @@ def load_model(ckpt_path: Path, device: torch.device) -> Tuple[CheXpertModel, Co
     known = {f.name for f in Config.__dataclass_fields__.values()}
     cfg_dict = {k: v for k, v in cfg_dict.items() if k in known}
     cfg = Config(**cfg_dict)
-    model = CheXpertModel(cfg)
+    model = CheXpertModel(cfg, pretrained=False)
     model.load_state_dict(ckpt["model"], strict=True)
     model.to(device).eval()
     # Support both new ("best_metric" + "primary_metric") and old
@@ -362,8 +362,12 @@ def main() -> None:
         logits = apply_temperature_scaling(logits, temperatures)
         print(f"  applied temperature scaling: {temperatures.tolist()}", flush=True)
 
-    # Sigmoid
-    probs = 1.0 / (1.0 + np.exp(-logits))
+    # Convert logits to predictions
+    if cfg.target_type == "raw":
+        probs = np.clip(logits, -1, 1)
+        print("  raw target mode: clipping logits to [-1, 1]", flush=True)
+    else:
+        probs = 1.0 / (1.0 + np.exp(-logits))
 
     # Derived No Finding (applied after sigmoid, operates on the FULL label
     # set so 14-label aux training can use all 13 non-NF pathologies in the

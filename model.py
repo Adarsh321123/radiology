@@ -1,14 +1,10 @@
-"""DINOv3 ViT-H+/16 backbone + classification head.
+"""Model backbones for CheXpert classification.
 
-Two head types:
-  - "attention" (default): single-query multi-head attention pool over
-    all backbone tokens (CLS + storage registers + all patches), then
-    Linear → num_labels. Lets the head learn to weight spatial tokens
-    per task — useful for CheXpert where findings are often localized.
-  - "cls": plain Linear on the CLS token only.
+Supports two model types (selected via cfg.model_type):
 
-Uses the native Meta DINOv3 loader via a local repo clone + .pth file
-(the HF mirror is gated). Backbone uses RoPE so any image size works.
+  - "dinov3": DINOv3 ViT-H+/16 (840M params) with attention pool or CLS head.
+  - "densenet121": torchvision DenseNet-121 (7M params) with ImageNet pretraining,
+    GAP + dropout + linear head.
 """
 from __future__ import annotations
 
@@ -17,6 +13,7 @@ from typing import Iterable, List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from config import Config
 
@@ -114,9 +111,67 @@ def _build_head(cfg: Config, dim: int) -> nn.Module:
 
 
 # --------------------------------------------------------------------------- #
-# top-level wrapper
+# DenseNet-121 backbone
 # --------------------------------------------------------------------------- #
-class CheXpertModel(nn.Module):
+class DenseNet121Model(nn.Module):
+    """DenseNet-121 with ImageNet pretrained weights, GAP + dropout + linear head."""
+
+    def __init__(self, cfg: Config, pretrained: bool = True) -> None:
+        super().__init__()
+        self.cfg = cfg
+        import torchvision.models as models
+        weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
+        base = models.densenet121(weights=weights)
+        self.features = base.features
+        self.hidden_dim = base.classifier.in_features  # 1024
+        self.drop = nn.Dropout(p=cfg.dropout)
+        self.classifier = nn.Linear(self.hidden_dim, cfg.num_labels)
+        nn.init.trunc_normal_(self.classifier.weight, std=0.02)
+        nn.init.zeros_(self.classifier.bias)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        feats = self.features(pixel_values)
+        feats = F.relu(feats, inplace=True)
+        feats = F.adaptive_avg_pool2d(feats, (1, 1))
+        feats = torch.flatten(feats, 1)
+        feats = self.drop(feats)
+        return self.classifier(feats)
+
+    def param_groups(
+        self,
+        lr_backbone: float,
+        lr_head: float,
+        weight_decay: float,
+    ) -> List[dict]:
+        def split_decay(named: Iterable[tuple[str, nn.Parameter]]) -> tuple[list, list]:
+            decay, no_decay = [], []
+            for name, p in named:
+                if not p.requires_grad:
+                    continue
+                if p.ndim <= 1:
+                    no_decay.append(p)
+                else:
+                    decay.append(p)
+            return decay, no_decay
+
+        bb_decay, bb_no_decay = split_decay(self.features.named_parameters())
+        hd_decay, hd_no_decay = split_decay(
+            list(self.classifier.named_parameters())
+        )
+
+        groups = [
+            {"params": bb_decay,    "lr": lr_backbone, "weight_decay": weight_decay, "name": "backbone_decay"},
+            {"params": bb_no_decay, "lr": lr_backbone, "weight_decay": 0.0,          "name": "backbone_nodecay"},
+            {"params": hd_decay,    "lr": lr_head,     "weight_decay": weight_decay, "name": "head_decay"},
+            {"params": hd_no_decay, "lr": lr_head,     "weight_decay": 0.0,          "name": "head_nodecay"},
+        ]
+        return [g for g in groups if len(g["params"]) > 0]
+
+
+# --------------------------------------------------------------------------- #
+# top-level wrapper (DINOv3)
+# --------------------------------------------------------------------------- #
+class CheXpertDINOv3Model(nn.Module):
     """DINOv3 backbone + classification head."""
 
     def __init__(self, cfg: Config) -> None:
@@ -127,39 +182,21 @@ class CheXpertModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.head = _build_head(cfg, hidden_dim)
 
-    # -------------------------------------------------------------- #
-    # forward
-    # -------------------------------------------------------------- #
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """pixel_values : (B, 3, H, W) float tensor (ImageNet-normalized).
-
-        Returns (B, num_labels) logits.
-        """
         feats = self.backbone.forward_features(pixel_values)
         return self.head(feats)
 
-    # -------------------------------------------------------------- #
-    # optimizer helpers
-    # -------------------------------------------------------------- #
     def param_groups(
         self,
         lr_backbone: float,
         lr_head: float,
         weight_decay: float,
     ) -> List[dict]:
-        """Two-group AdamW layout with no-decay on biases/1-D params.
-
-        The learned attention query is 3-D ((1,1,D)) so the ndim<=1 rule
-        puts it in the decay bucket; we special-case it into no-decay
-        since it's functionally a learned "position / search" vector.
-        """
-        # Explicit no-decay suffixes for learned direction vectors that
-        # are multi-dimensional and therefore missed by the ndim<=1 rule.
         _NO_DECAY_SUFFIXES = (
             "cls_token",
             "storage_tokens",
             "mask_token",
-            "query",  # attention pool learned query
+            "query",
         )
 
         def split_decay(named: Iterable[tuple[str, nn.Parameter]]) -> tuple[list, list]:
@@ -183,3 +220,16 @@ class CheXpertModel(nn.Module):
             {"params": hd_no_decay, "lr": lr_head,     "weight_decay": 0.0,          "name": "head_nodecay"},
         ]
         return [g for g in groups if len(g["params"]) > 0]
+
+
+# --------------------------------------------------------------------------- #
+# factory
+# --------------------------------------------------------------------------- #
+# Backward-compatible alias used by train.py and submit.py
+def CheXpertModel(cfg: Config, pretrained: bool = True) -> nn.Module:
+    if cfg.model_type == "densenet121":
+        return DenseNet121Model(cfg, pretrained=pretrained)
+    elif cfg.model_type == "dinov3":
+        return CheXpertDINOv3Model(cfg)
+    else:
+        raise ValueError(f"unknown model_type: {cfg.model_type!r}")

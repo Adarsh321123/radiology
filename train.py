@@ -51,14 +51,44 @@ def _json_safe(obj):
 
 def _validate_config(cfg: Config) -> None:
     """Fast sanity checks that should fire before the model is constructed."""
-    for attr in ("labels_csv", "test_ids_csv", "dinov3_repo", "dinov3_weights", "data_root"):
+    required_paths = ["labels_csv", "test_ids_csv", "data_root"]
+    if cfg.model_type == "dinov3":
+        required_paths += ["dinov3_repo", "dinov3_weights"]
+    for attr in required_paths:
         p = Path(getattr(cfg, attr))
         if not p.exists():
             raise FileNotFoundError(f"cfg.{attr}={p} does not exist")
-    if cfg.head_type not in ("cls", "attention"):
+    if cfg.model_type == "dinov3" and cfg.head_type not in ("cls", "attention"):
         raise ValueError(f"cfg.head_type must be 'cls' or 'attention', got {cfg.head_type!r}")
+    if cfg.model_type not in ("dinov3", "densenet121"):
+        raise ValueError(f"cfg.model_type must be 'dinov3' or 'densenet121', got {cfg.model_type!r}")
+    if cfg.target_type not in ("binary", "raw"):
+        raise ValueError(f"cfg.target_type must be 'binary' or 'raw', got {cfg.target_type!r}")
+    if cfg.loss_fn not in ("bce", "mse", "smooth_l1"):
+        raise ValueError(f"cfg.loss_fn must be 'bce', 'mse', or 'smooth_l1', got {cfg.loss_fn!r}")
     if cfg.num_labels != len(cfg.label_names):
         raise ValueError(f"cfg.num_labels={cfg.num_labels} != len(label_names)={len(cfg.label_names)}")
+    valid_label_strategies = {"ones", "zeros", "ignore"}
+    if cfg.default_uncertain_strategy not in valid_label_strategies:
+        raise ValueError(
+            "cfg.default_uncertain_strategy must be one of "
+            f"{sorted(valid_label_strategies)}, got {cfg.default_uncertain_strategy!r}"
+        )
+    if cfg.blank_strategy not in valid_label_strategies:
+        raise ValueError(
+            f"cfg.blank_strategy must be one of {sorted(valid_label_strategies)}, "
+            f"got {cfg.blank_strategy!r}"
+        )
+    if cfg.uncertain_strategy:
+        bad = {
+            name: strategy
+            for name, strategy in cfg.uncertain_strategy.items()
+            if strategy not in valid_label_strategies
+        }
+        if bad:
+            raise ValueError(f"cfg.uncertain_strategy has invalid entries: {bad}")
+    if cfg.loss_reduction not in ("micro", "macro"):
+        raise ValueError(f"cfg.loss_reduction must be 'micro' or 'macro', got {cfg.loss_reduction!r}")
     if cfg.epochs <= 0:
         raise ValueError(f"cfg.epochs must be > 0, got {cfg.epochs}")
     if cfg.batch_size_per_gpu <= 0:
@@ -132,6 +162,95 @@ def mixup_batch(
     return x, y_mixed
 
 
+def masked_bce_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    reduction: str = "micro",
+) -> torch.Tensor:
+    """BCEWithLogits with NaN targets masked out.
+
+    reduction="micro" averages across every valid (sample, label) element,
+    matching the original code. reduction="macro" first averages valid
+    examples within each label, then averages labels equally. Labels with
+    zero valid examples in the batch are skipped.
+    """
+    nan_mask = torch.isnan(targets)
+    targets_safe = targets.nan_to_num(0.0)
+    per_elem_loss = F.binary_cross_entropy_with_logits(
+        logits, targets_safe, reduction="none",
+    )
+    valid = ~nan_mask
+    per_elem_loss = per_elem_loss * valid
+
+    if reduction == "micro":
+        return per_elem_loss.sum() / valid.sum().clamp(min=1)
+
+    if reduction == "macro":
+        valid_per_label = valid.sum(dim=0)
+        loss_per_label = per_elem_loss.sum(dim=0) / valid_per_label.clamp(min=1)
+        has_label = valid_per_label > 0
+        if has_label.any():
+            return loss_per_label[has_label].mean()
+        return logits.sum() * 0.0
+
+    raise ValueError(f"unknown loss reduction: {reduction!r}")
+
+
+def masked_mse_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    reduction: str = "micro",
+) -> torch.Tensor:
+    """MSE loss with NaN targets masked out. For raw -1/0/1 target training."""
+    nan_mask = torch.isnan(targets)
+    targets_safe = targets.nan_to_num(0.0)
+    per_elem_loss = (predictions - targets_safe) ** 2
+    valid = ~nan_mask
+    per_elem_loss = per_elem_loss * valid
+
+    if reduction == "micro":
+        return per_elem_loss.sum() / valid.sum().clamp(min=1)
+
+    if reduction == "macro":
+        valid_per_label = valid.sum(dim=0)
+        loss_per_label = per_elem_loss.sum(dim=0) / valid_per_label.clamp(min=1)
+        has_label = valid_per_label > 0
+        if has_label.any():
+            return loss_per_label[has_label].mean()
+        return predictions.sum() * 0.0
+
+    raise ValueError(f"unknown loss reduction: {reduction!r}")
+
+
+def masked_smooth_l1_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    reduction: str = "micro",
+) -> torch.Tensor:
+    """Smooth L1 loss with NaN targets masked out."""
+    nan_mask = torch.isnan(targets)
+    targets_safe = targets.nan_to_num(0.0)
+    per_elem_loss = F.smooth_l1_loss(predictions, targets_safe, reduction="none")
+    valid = ~nan_mask
+    per_elem_loss = per_elem_loss * valid
+
+    if reduction == "micro":
+        return per_elem_loss.sum() / valid.sum().clamp(min=1)
+
+    if reduction == "macro":
+        valid_per_label = valid.sum(dim=0)
+        loss_per_label = per_elem_loss.sum(dim=0) / valid_per_label.clamp(min=1)
+        has_label = valid_per_label > 0
+        if has_label.any():
+            return loss_per_label[has_label].mean()
+        return predictions.sum() * 0.0
+
+    raise ValueError(f"unknown loss reduction: {reduction!r}")
+
+
 # --------------------------------------------------------------------------- #
 # schedule
 # --------------------------------------------------------------------------- #
@@ -181,8 +300,11 @@ def evaluate(
 
     metrics: Dict[str, Dict[str, float]] = {}
     if is_main(rank):
-        yp = torch.sigmoid(all_logits).cpu().numpy()
-        yt = all_labels.cpu().numpy()  # contains nan for uncertains
+        if cfg.target_type == "raw":
+            yp = torch.clamp(all_logits, -1, 1).cpu().numpy()
+        else:
+            yp = torch.sigmoid(all_logits).cpu().numpy()
+        yt = all_labels.cpu().numpy()  # contains nan for masked labels
         # Restrict metrics to the leaderboard-scored labels. In 9-label mode,
         # this is a no-op (scored == label_names). In 14-label aux mode, this
         # drops the 5 aux columns so the primary metric reflects leaderboard
@@ -270,7 +392,9 @@ def main() -> None:
     # -------------------- model --------------------
     if is_main(rank):
         print(f"[rank 0] building model …", flush=True)
-    model = CheXpertModel(cfg).to(device)
+    resume_path = ckpt_dir / "ckpt_last.pt"
+    use_pretrained = not resume_path.exists()
+    model = CheXpertModel(cfg, pretrained=use_pretrained).to(device)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
@@ -311,7 +435,6 @@ def main() -> None:
     best_metric = _worst()
     start_epoch = 0
     skip_in_start_epoch = 0
-    resume_path = ckpt_dir / "ckpt_last.pt"
     if resume_path.exists():
         if is_main(rank):
             print(f"[rank 0] resuming from {resume_path}", flush=True)
@@ -389,21 +512,14 @@ def main() -> None:
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = model(x)
-                # Mask NaN labels (from "ignore" uncertain strategy).
-                # Replace NaN targets with 0 and zero out those positions in the loss.
-                nan_mask = torch.isnan(y)
-                if nan_mask.any():
-                    y_safe = y.clone()
-                    y_safe[nan_mask] = 0.0
-                    per_elem_loss = F.binary_cross_entropy_with_logits(
-                        logits, y_safe, reduction="none",
-                    )
-                    per_elem_loss[nan_mask] = 0.0
-                    # Mean over non-masked elements
-                    n_valid = (~nan_mask).sum()
-                    loss = per_elem_loss.sum() / n_valid.clamp(min=1)
+                if cfg.loss_fn == "mse":
+                    predictions = torch.clamp(logits, -1, 1)
+                    loss = masked_mse_loss(predictions, y, reduction=cfg.loss_reduction)
+                elif cfg.loss_fn == "smooth_l1":
+                    predictions = torch.clamp(logits, -1, 1)
+                    loss = masked_smooth_l1_loss(predictions, y, reduction=cfg.loss_reduction)
                 else:
-                    loss = F.binary_cross_entropy_with_logits(logits, y)
+                    loss = masked_bce_with_logits(logits, y, reduction=cfg.loss_reduction)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
