@@ -46,6 +46,7 @@ class Config:
     rotation_deg: float = 10.0
     brightness: float = 0.2
     contrast: float = 0.2
+    hflip: bool = False
 
     # --- labels ---
     # label_names: every label the MODEL is trained on. Default is the 9 scored
@@ -78,8 +79,9 @@ class Config:
     # --- model ---
     # model_type: "dinov3" (original ViT-H+) or "densenet121" (torchvision).
     model_type: str = "dinov3"
-    # DenseNet-121 settings
+    # DenseNet-121 / ConvNeXt settings
     dropout: float = 0.5
+    convnext_weights: str = ""
     # Native DINOv3 loader: we call torch.hub.load on a local clone of
     # facebookresearch/dinov3 and point at a downloaded .pth. The HF repo
     # is gated; bypassing HF avoids the access barrier.
@@ -106,11 +108,28 @@ class Config:
     # then averages labels equally; useful when blanks are masked and label
     # density differs by orders of magnitude.
     loss_reduction: str = "micro"
-    # "binary" (default): train targets are 0/1, loss is BCE, submit sigmoid probs.
+    # "binary": train targets are 0/1, loss is BCE, submit sigmoid probs.
     # "raw": train targets are -1/0/1, loss is MSE, submit clipped linear outputs.
+    # "3class": train targets are class indices {0=-1, 1=0, 2=+1}, loss is per-label CE,
+    #           submit P(+1) - P(-1).
     target_type: str = "binary"
-    # "bce" (default for binary), "mse" (default for raw), "smooth_l1"
+    # "bce" (default for binary), "mse" (default for raw), "smooth_l1", "ce" (for 3class)
     loss_fn: str = "bce"
+    # Per-label loss weights. If set, multiply each label's loss by its weight.
+    # Map from label name to float. Labels not listed get weight 1.0.
+    label_weights: Optional[dict] = None
+    # In raw target mode: list of label names whose uncertain (0) values
+    # should be masked from loss. Useful for labels like Pneumonia where
+    # uncertain dominates and raw MSE learns "predict 0" instead of
+    # useful pos/neg separation.
+    raw_uncertain_mask: Optional[List[str]] = None
+    # Optimizer: "adamw" (default) or "rmsprop"
+    optimizer: str = "adamw"
+    rmsprop_momentum: float = 0.9
+    rmsprop_alpha: float = 0.99
+    # EMA (exponential moving average of weights)
+    ema: bool = False
+    ema_decay: float = 0.999
 
     # --- eval / ckpt ---
     eval_every_steps: int = 500

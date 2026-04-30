@@ -363,7 +363,14 @@ def main() -> None:
         print(f"  applied temperature scaling: {temperatures.tolist()}", flush=True)
 
     # Convert logits to predictions
-    if cfg.target_type == "raw":
+    if cfg.target_type == "3class":
+        logits_3c = logits.reshape(-1, cfg.num_labels, 3)
+        exp = np.exp(logits_3c - logits_3c.max(axis=-1, keepdims=True))
+        probs_3c = exp / exp.sum(axis=-1, keepdims=True)
+        probs = probs_3c[:, :, 2] - probs_3c[:, :, 0]
+        probs = np.clip(probs, -1, 1)
+        print("  3-class mode: P(+1) - P(-1)", flush=True)
+    elif cfg.target_type == "raw":
         probs = np.clip(logits, -1, 1)
         print("  raw target mode: clipping logits to [-1, 1]", flush=True)
     else:

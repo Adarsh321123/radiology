@@ -102,10 +102,12 @@ class AttentionPoolHead(nn.Module):
 
 
 def _build_head(cfg: Config, dim: int) -> nn.Module:
+    num_classes_per_label = 3 if cfg.target_type == "3class" else 1
+    out_dim = cfg.num_labels * num_classes_per_label
     if cfg.head_type == "cls":
-        return ClsHead(dim, cfg.num_labels)
+        return ClsHead(dim, out_dim)
     elif cfg.head_type == "attention":
-        return AttentionPoolHead(dim, cfg.num_labels, num_heads=cfg.attn_pool_heads)
+        return AttentionPoolHead(dim, out_dim, num_heads=cfg.attn_pool_heads)
     else:
         raise ValueError(f"unknown head_type: {cfg.head_type!r}")
 
@@ -119,13 +121,15 @@ class DenseNet121Model(nn.Module):
     def __init__(self, cfg: Config, pretrained: bool = True) -> None:
         super().__init__()
         self.cfg = cfg
+        self.num_classes_per_label = 3 if cfg.target_type == "3class" else 1
         import torchvision.models as models
         weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
         base = models.densenet121(weights=weights)
         self.features = base.features
         self.hidden_dim = base.classifier.in_features  # 1024
         self.drop = nn.Dropout(p=cfg.dropout)
-        self.classifier = nn.Linear(self.hidden_dim, cfg.num_labels)
+        out_dim = cfg.num_labels * self.num_classes_per_label
+        self.classifier = nn.Linear(self.hidden_dim, out_dim)
         nn.init.trunc_normal_(self.classifier.weight, std=0.02)
         nn.init.zeros_(self.classifier.bias)
 
@@ -135,7 +139,10 @@ class DenseNet121Model(nn.Module):
         feats = F.adaptive_avg_pool2d(feats, (1, 1))
         feats = torch.flatten(feats, 1)
         feats = self.drop(feats)
-        return self.classifier(feats)
+        out = self.classifier(feats)
+        if self.num_classes_per_label == 3:
+            return out.view(-1, self.cfg.num_labels, 3)
+        return out
 
     def param_groups(
         self,
@@ -177,6 +184,7 @@ class CheXpertDINOv3Model(nn.Module):
     def __init__(self, cfg: Config) -> None:
         super().__init__()
         self.cfg = cfg
+        self.num_classes_per_label = 3 if cfg.target_type == "3class" else 1
         self.backbone = _load_dinov3_backbone(cfg)
         hidden_dim: int = int(self.backbone.embed_dim)
         self.hidden_dim = hidden_dim
@@ -184,7 +192,10 @@ class CheXpertDINOv3Model(nn.Module):
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         feats = self.backbone.forward_features(pixel_values)
-        return self.head(feats)
+        out = self.head(feats)
+        if self.num_classes_per_label == 3:
+            return out.view(-1, self.cfg.num_labels, 3)
+        return out
 
     def param_groups(
         self,
@@ -223,12 +234,85 @@ class CheXpertDINOv3Model(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# ConvNeXt backbone (via timm)
+# --------------------------------------------------------------------------- #
+class ConvNeXtModel(nn.Module):
+    """ConvNeXt-Base/Small with timm pretrained weights, GAP + dropout + linear head."""
+
+    def __init__(self, cfg: Config, pretrained: bool = True) -> None:
+        super().__init__()
+        self.cfg = cfg
+        import timm
+        self.num_classes_per_label = 3 if cfg.target_type == "3class" else 1
+        out_dim = cfg.num_labels * self.num_classes_per_label
+        model_name = {
+            "convnext_base": "convnext_base.fb_in22k_ft_in1k",
+            "convnext_small": "convnext_small.fb_in22k_ft_in1k",
+        }.get(cfg.model_type, cfg.model_type)
+        self.backbone = timm.create_model(
+            model_name, pretrained=False, num_classes=0, global_pool="avg",
+        )
+        if pretrained and hasattr(cfg, "convnext_weights") and cfg.convnext_weights:
+            weights_path = Path(cfg.convnext_weights).expanduser().resolve()
+            if weights_path.suffix == ".safetensors":
+                from safetensors.torch import load_file
+                sd = load_file(str(weights_path))
+            else:
+                sd = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+            self.backbone.load_state_dict(sd, strict=False)
+        self.hidden_dim = self.backbone.num_features
+        self.drop = nn.Dropout(p=cfg.dropout)
+        self.classifier = nn.Linear(self.hidden_dim, out_dim)
+        nn.init.trunc_normal_(self.classifier.weight, std=0.02)
+        nn.init.zeros_(self.classifier.bias)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        feats = self.backbone(pixel_values)
+        feats = self.drop(feats)
+        out = self.classifier(feats)
+        if self.num_classes_per_label == 3:
+            return out.view(-1, self.cfg.num_labels, 3)
+        return out
+
+    def param_groups(
+        self,
+        lr_backbone: float,
+        lr_head: float,
+        weight_decay: float,
+    ) -> List[dict]:
+        def split_decay(named: Iterable[tuple[str, nn.Parameter]]) -> tuple[list, list]:
+            decay, no_decay = [], []
+            for name, p in named:
+                if not p.requires_grad:
+                    continue
+                if p.ndim <= 1:
+                    no_decay.append(p)
+                else:
+                    decay.append(p)
+            return decay, no_decay
+
+        bb_decay, bb_no_decay = split_decay(self.backbone.named_parameters())
+        hd_decay, hd_no_decay = split_decay(
+            list(self.classifier.named_parameters())
+        )
+        groups = [
+            {"params": bb_decay,    "lr": lr_backbone, "weight_decay": weight_decay, "name": "backbone_decay"},
+            {"params": bb_no_decay, "lr": lr_backbone, "weight_decay": 0.0,          "name": "backbone_nodecay"},
+            {"params": hd_decay,    "lr": lr_head,     "weight_decay": weight_decay, "name": "head_decay"},
+            {"params": hd_no_decay, "lr": lr_head,     "weight_decay": 0.0,          "name": "head_nodecay"},
+        ]
+        return [g for g in groups if len(g["params"]) > 0]
+
+
+# --------------------------------------------------------------------------- #
 # factory
 # --------------------------------------------------------------------------- #
 # Backward-compatible alias used by train.py and submit.py
 def CheXpertModel(cfg: Config, pretrained: bool = True) -> nn.Module:
     if cfg.model_type == "densenet121":
         return DenseNet121Model(cfg, pretrained=pretrained)
+    elif cfg.model_type in ("convnext_base", "convnext_small"):
+        return ConvNeXtModel(cfg, pretrained=pretrained)
     elif cfg.model_type == "dinov3":
         return CheXpertDINOv3Model(cfg)
     else:

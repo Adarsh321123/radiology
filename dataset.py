@@ -41,7 +41,7 @@ IMAGENET_STD  = (0.229, 0.224, 0.225)
 # transforms
 # --------------------------------------------------------------------------- #
 def build_train_transform(cfg: Config) -> Callable:
-    return v2.Compose([
+    transforms = [
         v2.ToImage(),
         v2.RandomResizedCrop(
             size=(cfg.image_size, cfg.image_size),
@@ -50,9 +50,14 @@ def build_train_transform(cfg: Config) -> Callable:
         ),
         v2.RandomRotation(degrees=cfg.rotation_deg),
         v2.ColorJitter(brightness=cfg.brightness, contrast=cfg.contrast),
+    ]
+    if cfg.hflip:
+        transforms.append(v2.RandomHorizontalFlip(p=0.5))
+    transforms += [
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
+    ]
+    return v2.Compose(transforms)
 
 
 def build_val_transform(cfg: Config) -> Callable:
@@ -147,13 +152,33 @@ def _labels_to_array(
     return out.astype(np.float32)
 
 
-def _labels_to_raw_array(
+def _labels_to_3class_array(
     df: pd.DataFrame,
     label_names: List[str],
 ) -> np.ndarray:
-    """Return (N, num_labels) with raw -1/0/1 values. Blanks -> NaN (masked)."""
+    """Return (N, num_labels) int64 class indices. -1=neg->0, 0=unc->1, +1=pos->2, blank->-100 (ignored by CE)."""
     cols = df[label_names].copy()
-    arr = cols.to_numpy(dtype=np.float32)  # blank -> NaN, keeps -1/0/1
+    arr = cols.to_numpy(dtype=np.float32)
+    out = np.full_like(arr, -100, dtype=np.int64)
+    out[arr == -1.0] = 0
+    out[arr == 0.0] = 1
+    out[arr == 1.0] = 2
+    return out
+
+
+def _labels_to_raw_array(
+    df: pd.DataFrame,
+    label_names: List[str],
+    uncertain_mask_labels: List[str] | None = None,
+) -> np.ndarray:
+    """Return (N, num_labels) with raw -1/0/1 values. Blanks -> NaN (masked).
+    If uncertain_mask_labels is set, uncertain (0) values for those labels -> NaN."""
+    cols = df[label_names].copy()
+    arr = cols.to_numpy(dtype=np.float32).copy()  # .copy() makes it writable
+    if uncertain_mask_labels:
+        for i, name in enumerate(label_names):
+            if name in uncertain_mask_labels:
+                arr[arr[:, i] == 0.0, i] = np.nan
     return arr
 
 
@@ -187,9 +212,15 @@ def load_and_split(
     df_val = df[in_val].reset_index(drop=True)
     df_train = df[~in_val].reset_index(drop=True)
 
-    if cfg.target_type == "raw":
-        y_train = _labels_to_raw_array(df_train, cfg.label_names)
-        y_val = _labels_to_raw_array(df_val, cfg.label_names)
+    if cfg.target_type == "3class":
+        y_train = _labels_to_3class_array(df_train, cfg.label_names)
+        y_val = _labels_to_3class_array(df_val, cfg.label_names)
+        return df_train, df_val, y_train, y_val
+    elif cfg.target_type == "raw":
+        y_train = _labels_to_raw_array(df_train, cfg.label_names,
+                                        uncertain_mask_labels=cfg.raw_uncertain_mask)
+        y_val = _labels_to_raw_array(df_val, cfg.label_names,
+                                      uncertain_mask_labels=cfg.raw_uncertain_mask)
     else:
         custom_train_labels = (
             cfg.uncertain_strategy
@@ -227,7 +258,7 @@ class CheXpertDataset(Dataset):
     ) -> None:
         assert len(df) == len(y), f"{len(df)} rows vs {len(y)} labels"
         self.paths: List[str] = df["Path"].tolist()
-        self.y = y.astype(np.float32)
+        self.y = y
         self.data_root = Path(data_root)
         self.transform = transform
 
@@ -239,5 +270,5 @@ class CheXpertDataset(Dataset):
         with Image.open(full) as img:
             img = img.convert("RGB")  # grayscale → 3-channel
             x = self.transform(img)
-        y = torch.from_numpy(self.y[idx])
+        y = torch.from_numpy(np.array(self.y[idx]))
         return x, y
